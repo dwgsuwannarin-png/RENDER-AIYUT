@@ -4,7 +4,7 @@ import ImageUploader from './components/ImageUploader';
 import GeneratedImage from './components/GeneratedImage';
 import { AppStatus, UploadedImage, GenerationResult, Preset } from './types';
 import { generateImageFromReference, enhancePrompt as enhancePromptService, analyzePlanGeometry } from './services/geminiService';
-import { Wand2, Sparkles, Zap, Cpu, Settings2, ImagePlus, Globe, Key, Brush, Undo, Redo, RefreshCw, PenTool, Image as ImageIcon, Loader2, RotateCcw, ChevronDown, ChevronRight, AlertTriangle, Palette } from 'lucide-react';
+import { Wand2, Sparkles, Zap, Cpu, Settings2, ImagePlus, Globe, Key, Brush, Undo, Redo, RefreshCw, PenTool, Image as ImageIcon, Loader2, RotateCcw, ChevronDown, ChevronRight, AlertTriangle, Palette, LogIn, ExternalLink, X } from 'lucide-react';
 import { TRANSLATIONS, EXTERIOR_PRESETS, INTERIOR_PRESETS, PLAN_PRESETS } from './constants';
 
 // --- TYPE DECLARATIONS ---
@@ -51,7 +51,12 @@ const App: React.FC = () => {
   const [manualApiKey, setManualApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   
-  const [model, setModel] = useState('gemini-3-pro-optimized'); 
+  // Google AI Studio Integration State
+  const [isAistudioAvailable, setIsAistudioAvailable] = useState(false);
+  const [isGoogleConnected, setIsGoogleConnected] = useState(false);
+
+  const [model, setModel] = useState('gemini-2.5-flash-image'); 
+  const [tier, setTier] = useState<'FREE' | 'PRO'>('FREE');
   const [language, setLanguage] = useState<'EN' | 'TH'>('TH');
   const [activePresets, setActivePresets] = useState<Preset[]>(EXTERIOR_PRESETS);
   
@@ -68,6 +73,25 @@ const App: React.FC = () => {
   const [resultHistory, setResultHistory] = useState<GenerationResult[]>([]);
   const [redoStack, setRedoStack] = useState<GenerationResult[]>([]);
 
+  // Settings UI State
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
+  // Check for AI Studio environment on mount
+  useEffect(() => {
+    const checkAiStudio = async () => {
+        if (window.aistudio) {
+            setIsAistudioAvailable(true);
+            try {
+                const hasKey = await window.aistudio.hasSelectedApiKey();
+                setIsGoogleConnected(hasKey);
+            } catch (e) {
+                console.error("Failed to check API key status", e);
+            }
+        }
+    };
+    checkAiStudio();
+  }, []);
+
   // Update presets when tab changes
   useEffect(() => {
     setSelectedPresetId(null);
@@ -80,9 +104,20 @@ const App: React.FC = () => {
     }
   }, [tab]);
 
+  // Sync Tier with Model
+  useEffect(() => {
+     if (tier === 'FREE') {
+        setModel('gemini-2.5-flash-image');
+     } else {
+        // Default to optimized pro when switching to Pro
+        setModel('gemini-3-pro-optimized'); 
+     }
+  }, [tier]);
+
   const t = TRANSLATIONS[language];
   const envKey = getEnvApiKey();
-  const isProUnlocked = !!manualApiKey;
+  // Connection is valid if we have a manual key OR we are connected via Google AI Studio (which injects envKey) OR envKey is present from build
+  const isProUnlocked = !!manualApiKey || isGoogleConnected || !!envKey;
 
   // --- HELPER TO FIND PRESET PROMPT ---
   const findPresetPrompt = (presets: Preset[], id: string): string | null => {
@@ -98,6 +133,23 @@ const App: React.FC = () => {
 
   // --- HANDLERS ---
   
+  const handleConnectGoogle = async () => {
+      if (window.aistudio) {
+          try {
+              await window.aistudio.openSelectKey();
+              // Re-check after dialog closes
+              const hasKey = await window.aistudio.hasSelectedApiKey();
+              setIsGoogleConnected(hasKey);
+              if (hasKey) {
+                  // Slight delay to allow env var propagation if needed, though usually instant in this context
+                  setStatus(AppStatus.IDLE); 
+              }
+          } catch (e) {
+              console.error("Failed to open key selector", e);
+          }
+      }
+  };
+
   const handleSaveApiKey = () => {
     if (manualApiKey) {
         localStorage.setItem('gemini_api_key', manualApiKey);
@@ -105,6 +157,7 @@ const App: React.FC = () => {
         localStorage.removeItem('gemini_api_key');
     }
     alert(t.keySaved);
+    setShowApiKeyInput(false); 
   };
 
   const handleEnhancePrompt = async () => {
@@ -118,7 +171,16 @@ const App: React.FC = () => {
     if (!textToEnhance) return alert(t.enterPrompt);
     const keyToUse = manualApiKey || envKey;
 
-    if (!keyToUse && !window.aistudio) return alert(t.enterKey);
+    if (!keyToUse && !window.aistudio) {
+        return alert(t.enterKey);
+    }
+    
+    // If we rely on window.aistudio but no key selected yet
+    if (!keyToUse && window.aistudio && !isGoogleConnected) {
+        await handleConnectGoogle();
+        // If still not connected after trying
+        if (!(await window.aistudio.hasSelectedApiKey())) return;
+    }
 
     setIsEnhancing(true);
     try {
@@ -146,11 +208,35 @@ const App: React.FC = () => {
 
     let keyToUse = manualApiKey || envKey;
     
+    // Auto-connect flow if no key is present
     if (!keyToUse) {
         if (window.aistudio) {
             const hasKey = await window.aistudio.hasSelectedApiKey();
-            if (!hasKey) try { await window.aistudio.openSelectKey(); } catch {}
+            if (!hasKey) {
+                 try { 
+                     await window.aistudio.openSelectKey(); 
+                     // Check again
+                     const nowHasKey = await window.aistudio.hasSelectedApiKey();
+                     if (nowHasKey) {
+                         setIsGoogleConnected(true);
+                         // Key should now be available in process.env.API_KEY for the next call
+                     } else {
+                         setStatus(AppStatus.IDLE);
+                         return; // User cancelled
+                     }
+                 } catch (e) {
+                     console.error(e);
+                     setStatus(AppStatus.IDLE);
+                     return;
+                 }
+            } else {
+                setIsGoogleConnected(true);
+            }
         } else {
+             // For FREE tier, we might allow basic generation if we had a backend proxy, 
+             // but here we strictly require a key for Client-Side API calls.
+             // However, if the user explicitly selected FREE tier, maybe we prompt them less aggressively?
+             // For now, assume key is needed for all Gemini calls from browser.
              alert(t.enterKey);
              setStatus(AppStatus.IDLE);
              return;
@@ -223,23 +309,33 @@ const App: React.FC = () => {
     
     let selectedModel = model;
     let targetResolution: '1K' | '2K' | '4K' = '1K';
-    const hasUserKey = !!manualApiKey; 
     
-    if (!hasUserKey) {
-        if (selectedModel === 'gemini-3-pro-image-preview' || selectedModel === 'gemini-3-pro-ultra-4k') {
-             selectedModel = 'gemini-2.5-flash-image'; 
-             targetResolution = '1K';
-        }
-    }
-
-    if (selectedModel === 'gemini-3-pro-ultra-4k') {
-        selectedModel = 'gemini-3-pro-image-preview';
-        targetResolution = '4K';
-    } else if (selectedModel === 'gemini-3-pro-image-preview') {
-         targetResolution = '2K';
-    } else if (selectedModel === 'gemini-3-pro-optimized') {
+    // We consider Google Connected as "Pro" or "Valid Key" owner
+    const hasValidKey = !!manualApiKey || isGoogleConnected || !!envKey;
+    
+    // Enforce Tier Logic
+    if (tier === 'FREE') {
         selectedModel = 'gemini-2.5-flash-image';
         targetResolution = '1K';
+    } else {
+        // PRO TIER
+        if (!hasValidKey) {
+            // Fallback if they selected Pro but have no key
+             if (selectedModel === 'gemini-3-pro-image-preview' || selectedModel === 'gemini-3-pro-ultra-4k') {
+                 selectedModel = 'gemini-2.5-flash-image'; 
+                 targetResolution = '1K';
+            }
+        }
+    
+        if (selectedModel === 'gemini-3-pro-ultra-4k') {
+            selectedModel = 'gemini-3-pro-image-preview';
+            targetResolution = '4K';
+        } else if (selectedModel === 'gemini-3-pro-image-preview') {
+             targetResolution = '2K';
+        } else if (selectedModel === 'gemini-3-pro-optimized') {
+            selectedModel = 'gemini-2.5-flash-image';
+            targetResolution = '1K';
+        }
     }
 
     try {
@@ -271,7 +367,7 @@ const App: React.FC = () => {
       if (e.message && (e.message.includes('403') || e.message.includes('Permission'))) {
          if (window.aistudio && !manualApiKey) {
             if (confirm("Permission Denied. Select new Key?")) {
-                try { await window.aistudio.openSelectKey(); } catch {}
+                handleConnectGoogle();
             }
          }
       }
@@ -347,7 +443,9 @@ const App: React.FC = () => {
 
       <aside className="w-[340px] flex-shrink-0 flex flex-col border-r border-white/10 bg-[#0c1421] z-20 shadow-2xl h-full">
         <div className="p-5 border-b border-white/10 flex-shrink-0 bg-[#0c1421]/95 backdrop-blur z-10 flex flex-col gap-4">
-          <div className="flex items-center justify-between">
+          
+          {/* HEADER & TIER SELECTOR */}
+          <div className="flex flex-col gap-4">
              <div className="flex items-center gap-3">
                <div className="bg-gradient-to-tr from-blue-500 to-cyan-600 p-2.5 rounded-xl shadow-lg shadow-blue-500/20">
                  <Sparkles className="w-5 h-5 text-white" />
@@ -358,52 +456,26 @@ const App: React.FC = () => {
                  </h1>
                </div>
              </div>
+
+             {/* TIER TOGGLE BUTTONS */}
+             <div className="flex bg-zinc-950/50 p-1 rounded-lg border border-white/5">
+                 <button 
+                   onClick={() => setTier('FREE')}
+                   className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-all flex items-center justify-center gap-1.5 ${tier === 'FREE' ? 'bg-zinc-700 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                 >
+                    <Zap size={10} className={tier === 'FREE' ? 'text-yellow-400' : ''} /> Standard (Free)
+                 </button>
+                 <button 
+                   onClick={() => setTier('PRO')}
+                   className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-all flex items-center justify-center gap-1.5 ${tier === 'PRO' ? 'bg-blue-600 text-white shadow-sm shadow-blue-500/20' : 'text-zinc-500 hover:text-zinc-300'}`}
+                 >
+                    <Sparkles size={10} className={tier === 'PRO' ? 'text-blue-200' : ''} /> Pro (2K)
+                 </button>
+             </div>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-6">
-
-          {/* AI SETTINGS */}
-          <div className="space-y-1">
-             <div className="flex items-center justify-between">
-                <label className="text-[10px] font-bold text-zinc-500 flex items-center gap-1.5 tracking-wider uppercase"><Settings2 size={10}/> {t.aiSettings}</label>
-             </div>
-             <div className="flex flex-col rounded-lg border border-white/5 bg-black/20 overflow-hidden">
-                <div className="relative border-b border-white/5 group">
-                    <div className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-600 group-hover:text-zinc-400 transition-colors"><Cpu size={12} /></div>
-                    <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full bg-transparent text-zinc-300 text-[10px] pl-8 pr-6 py-2 appearance-none focus:bg-white/5 outline-none cursor-pointer font-medium hover:text-white transition-colors">
-                      <option value="gemini-3-pro-optimized" className="bg-[#0c1421]">Gemini 3.0 Pro (Optimized)</option>
-                      <option value="gemini-3-pro-image-preview" className="bg-[#0c1421]">Gemini 3.0 Pro (2K)</option>
-                      <option value="gemini-3-pro-ultra-4k" className="bg-[#0c1421]">Gemini 3.0 Pro (4K)</option>
-                      <option value="gemini-2.5-flash-image" className="bg-[#0c1421]">Gemini 2.5 Flash</option>
-                    </select>
-                     <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-700"><ChevronDown size={10} /></div>
-                </div>
-                {!isProUnlocked && isProModelSelected && (
-                    <div className="bg-yellow-500/10 px-2 py-1 flex items-start gap-1.5 border-b border-white/5">
-                        <AlertTriangle size={10} className="text-yellow-500 mt-0.5 shrink-0"/>
-                        <p className="text-[9px] text-yellow-200/80 leading-tight">{t.needKeyWarning}</p>
-                    </div>
-                )}
-                <div className="flex items-center bg-black/10 hover:bg-white/5 transition-colors">
-                   <button onClick={async () => { if (window.aistudio) try { await window.aistudio.openSelectKey(); } catch {} }} className="flex-1 flex items-center justify-between text-[10px] px-2.5 py-2 text-left" title={t.apiKeyStatus}>
-                      <span className="text-zinc-400 font-medium">License</span>
-                      <div className={`flex items-center gap-1.5 ${isProUnlocked ? 'text-green-400' : 'text-zinc-500'}`}>
-                            <div className={`w-1.5 h-1.5 rounded-full ${isProUnlocked ? 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]' : 'bg-zinc-600'}`}></div>
-                            <span className="font-bold">{isProUnlocked ? 'PRO' : 'FREE'}</span>
-                      </div>
-                   </button>
-                   <div className="w-px h-3 bg-white/5 mx-1"></div>
-                   <button onClick={() => setShowApiKeyInput(!showApiKeyInput)} className={`p-2 text-zinc-600 hover:text-white transition-colors ${showApiKeyInput ? 'text-cyan-400 bg-cyan-500/10' : ''}`} title="Enter Manual Key"><Key size={10} /></button>
-                </div>
-                {showApiKeyInput && (
-                   <div className="bg-black/40 p-1.5 flex items-center gap-1 animate-in slide-in-from-top-1 border-t border-white/5">
-                       <input type="password" value={manualApiKey} onChange={(e) => setManualApiKey(e.target.value)} placeholder="Paste API Key..." className="flex-1 bg-zinc-900/50 text-white text-[10px] px-2 py-1.5 outline-none placeholder-zinc-700 rounded border border-white/5 focus:border-cyan-500/50 transition-colors"/>
-                       <button onClick={() => { handleSaveApiKey(); setShowApiKeyInput(false); }} className="px-2 py-1.5 text-[9px] font-bold rounded bg-cyan-600 hover:bg-cyan-500 text-white shadow-lg shadow-cyan-900/20">SAVE</button>
-                   </div>
-                )}
-             </div>
-          </div>
 
           <div className="flex p-1 bg-black/20 rounded-lg border border-white/5">
             {['EXTERIOR', 'INTERIOR', 'PLAN'].map((tabName) => (
@@ -504,15 +576,121 @@ const App: React.FC = () => {
       <main className="flex-1 relative bg-zinc-950 overflow-hidden flex flex-col">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,_rgba(24,24,27,0.8),_rgba(9,9,11,1))] pointer-events-none"></div>
           
-          <div className="w-full py-4 z-[100] flex items-center justify-center relative bg-transparent shrink-0">
-             <button onClick={handleNewProject} className="flex items-center gap-2 bg-zinc-800 border border-zinc-600 text-zinc-100 hover:text-white hover:bg-zinc-700 px-8 py-3 rounded-full text-sm font-bold transition-all shadow-xl hover:shadow-cyan-500/30 group ring-1 ring-white/10" title={t.startNew}>
-                 <RotateCcw size={16} className="text-zinc-400 group-hover:text-cyan-400 transition-colors" /> {t.newProject}
+          <div className="w-full py-4 px-6 z-[100] flex items-center justify-between relative bg-transparent shrink-0">
+             {/* LEFT SIDE: New Project */}
+             <button onClick={handleNewProject} className="flex items-center gap-2 bg-zinc-800 border border-zinc-600 text-zinc-100 hover:text-white hover:bg-zinc-700 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-xl hover:shadow-cyan-500/30 group ring-1 ring-white/10" title={t.startNew}>
+                 <RotateCcw size={14} className="text-zinc-400 group-hover:text-cyan-400 transition-colors" /> {t.newProject}
               </button>
              
-             <div className="absolute right-6 top-1/2 -translate-y-1/2">
-                <button onClick={() => setLanguage(l => l === 'EN' ? 'TH' : 'EN')} className="flex items-center gap-2 bg-zinc-900/50 border border-zinc-700/50 text-zinc-400 hover:text-white px-3 py-1.5 rounded-full text-[10px] font-bold transition-all">
+             {/* RIGHT SIDE: Language & AI Settings (Moved here) */}
+             <div className="flex items-center gap-3 relative">
+                <button onClick={() => setLanguage(l => l === 'EN' ? 'TH' : 'EN')} className="flex items-center gap-2 bg-zinc-900/50 border border-zinc-700/50 text-zinc-400 hover:text-white px-3 py-2 rounded-full text-[10px] font-bold transition-all">
                    <Globe size={12} /> {language}
                  </button>
+
+                 <div className="relative">
+                    <button 
+                       onClick={() => setShowSettingsPanel(!showSettingsPanel)}
+                       className={`flex items-center gap-2 px-3 py-2 rounded-full text-[10px] font-bold transition-all border ${showSettingsPanel ? 'bg-zinc-800 border-zinc-600 text-white' : 'bg-zinc-900/50 border-zinc-700/50 text-zinc-400 hover:text-white'}`}
+                    >
+                        <Settings2 size={12} /> {t.aiSettings} {isProUnlocked ? <div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> : null}
+                    </button>
+
+                    {/* TOP RIGHT FLOATING PANEL */}
+                    {showSettingsPanel && (
+                        <div className="absolute right-0 top-full mt-2 w-[280px] bg-[#0c1421] border border-white/10 rounded-xl shadow-2xl p-4 z-50 animate-in slide-in-from-top-2 fade-in">
+                            <div className="flex items-center justify-between mb-3">
+                                <h3 className="text-xs font-bold text-white uppercase tracking-wider">Advanced Settings</h3>
+                                <button onClick={() => setShowSettingsPanel(false)} className="text-zinc-500 hover:text-white"><X size={14}/></button>
+                            </div>
+
+                            {/* MODEL SELECTOR */}
+                             <div className="flex flex-col rounded-lg border border-white/5 bg-black/20 overflow-hidden mb-4">
+                                <div className="relative border-b border-white/5 group">
+                                    <div className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-600 group-hover:text-zinc-400 transition-colors"><Cpu size={12} /></div>
+                                    <select value={model} onChange={(e) => setModel(e.target.value)} className="w-full bg-transparent text-zinc-300 text-[10px] pl-8 pr-6 py-2 appearance-none focus:bg-white/5 outline-none cursor-pointer font-medium hover:text-white transition-colors">
+                                      <option value="gemini-3-pro-optimized" className="bg-[#0c1421]">Gemini 3.0 Pro (Optimized)</option>
+                                      <option value="gemini-3-pro-image-preview" className="bg-[#0c1421]">Gemini 3.0 Pro (2K)</option>
+                                      <option value="gemini-3-pro-ultra-4k" className="bg-[#0c1421]">Gemini 3.0 Pro (4K)</option>
+                                      <option value="gemini-2.5-flash-image" className="bg-[#0c1421]">Gemini 2.5 Flash</option>
+                                    </select>
+                                     <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-700"><ChevronDown size={10} /></div>
+                                </div>
+                                {!isProUnlocked && isProModelSelected && (
+                                    <div className="bg-yellow-500/10 px-2 py-1 flex items-start gap-1.5 border-b border-white/5">
+                                        <AlertTriangle size={10} className="text-yellow-500 mt-0.5 shrink-0"/>
+                                        <p className="text-[9px] text-yellow-200/80 leading-tight">{t.needKeyWarning}</p>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            {/* CONNECTION & API KEY */}
+                            <div className="flex flex-col gap-2">
+                               <a 
+                                 href="https://aistudio.google.com/app/apikey" 
+                                 target="_blank" 
+                                 rel="noopener noreferrer"
+                                 className="flex items-center justify-between px-3 py-2 bg-zinc-900 hover:bg-zinc-800 rounded border border-white/5 transition-colors group"
+                               >
+                                 <span className="text-[10px] font-bold text-zinc-400 group-hover:text-white flex items-center gap-1.5">
+                                    <Key size={10} /> {t.getKey}
+                                 </span>
+                                 <ExternalLink size={10} className="text-zinc-600 group-hover:text-zinc-400" />
+                               </a>
+
+                               {isAistudioAvailable && (
+                                    <div>
+                                        {isGoogleConnected ? (
+                                            <div className="flex items-center justify-between px-3 py-2 bg-green-500/10 border border-green-500/20 rounded">
+                                                <div className="flex items-center gap-1.5">
+                                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.8)]"></div>
+                                                    <span className="text-[10px] font-bold text-green-400">Google Connected</span>
+                                                </div>
+                                                <button onClick={handleConnectGoogle} className="text-[9px] text-zinc-500 hover:text-white underline">Change</button>
+                                            </div>
+                                        ) : (
+                                            <button onClick={handleConnectGoogle} className="w-full flex items-center justify-center gap-1.5 bg-[#1a73e8] hover:bg-[#1557b0] text-white py-2 rounded text-[10px] font-bold transition-colors shadow-lg shadow-blue-900/20">
+                                                <LogIn size={10} /> Connect Google Account
+                                            </button>
+                                        )}
+                                    </div>
+                               )}
+
+                               <div className="bg-zinc-900/30 rounded border border-white/5 overflow-hidden">
+                                   <button
+                                     onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+                                     className={`w-full flex items-center justify-between px-3 py-2 transition-all ${showApiKeyInput ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'}`}
+                                   >
+                                       <span className="text-[10px] font-bold text-zinc-500 hover:text-zinc-300 flex items-center gap-1.5">
+                                          <Settings2 size={10} /> {manualApiKey ? 'Custom Key Active' : 'Enter Manual Key'}
+                                       </span>
+                                       <div className={`transition-transform duration-200 ${showApiKeyInput ? 'rotate-180' : ''}`}>
+                                         <ChevronDown size={10} className="text-zinc-600" />
+                                       </div>
+                                   </button>
+                                   
+                                   {showApiKeyInput && (
+                                       <div className="p-2 bg-black/40 flex flex-col gap-2 border-t border-white/5 animate-in slide-in-from-top-1">
+                                           <input
+                                             type="password"
+                                             value={manualApiKey}
+                                             onChange={(e) => setManualApiKey(e.target.value)}
+                                             placeholder={t.apiKeyPlaceholder}
+                                             className="w-full bg-zinc-900 text-white text-[10px] px-2 py-1.5 rounded border border-white/10 focus:border-cyan-500 outline-none placeholder-zinc-600"
+                                           />
+                                           <button
+                                             onClick={handleSaveApiKey}
+                                             className="w-full py-1.5 text-[10px] font-bold rounded bg-cyan-700 hover:bg-cyan-600 text-white transition-colors"
+                                           >
+                                             {t.saveKey}
+                                           </button>
+                                       </div>
+                                   )}
+                               </div>
+                            </div>
+                        </div>
+                    )}
+                 </div>
              </div>
           </div>
 
